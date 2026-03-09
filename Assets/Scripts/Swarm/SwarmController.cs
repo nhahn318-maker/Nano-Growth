@@ -31,6 +31,8 @@ namespace NanoGrowth
         private float currentSwayAmount;
 
         private SwarmMorphController morphController;
+        
+        public int CurrentNanoMass { get; private set; } = 0;
 
         private void Start()
         {
@@ -129,6 +131,8 @@ namespace NanoGrowth
 
         public void Grow(int amount)
         {
+            CurrentNanoMass += amount; // Ghi nhận độ lớn để mở khóa biến hình / ăn vật to hơn
+
             var main = swarmParticles.main;
             main.maxParticles += amount;
             swarmParticles.Emit(amount);

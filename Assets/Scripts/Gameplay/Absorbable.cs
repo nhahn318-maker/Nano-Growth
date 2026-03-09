@@ -12,6 +12,7 @@ namespace NanoGrowth
         [Header("Settings")]
         [SerializeField] private float dissolveDuration = 1.5f;
         [SerializeField] private int growthAmount = 100;
+        [SerializeField] private int requiredNanoMass = 0; // Lượng hạt nhỏ nhất cần để nuốt vật này
         
         [SerializeField] private float pullSpeed = 5f;
         [SerializeField] private float shrinkSpeed = 2f;
@@ -55,8 +56,23 @@ namespace NanoGrowth
             // Trigger logic for either the Swarm Center or individual particles (if they have triggers)
             if (!isBeingAbsorbed && (other.CompareTag("Swarm") || other.GetComponent<SwarmController>() != null || other.CompareTag("Player")))
             {
-                swarmTarget = other.transform;
-                StartAbsorb();
+                SwarmController swarm = other.GetComponentInParent<SwarmController>();
+                if (swarm == null) swarm = FindObjectOfType<SwarmController>();
+
+                if (swarm != null)
+                {
+                    // Kiểm tra tiến trình (Progression)
+                    if (swarm.CurrentNanoMass >= requiredNanoMass)
+                    {
+                        swarmTarget = other.transform;
+                        StartAbsorb();
+                    }
+                    else
+                    {
+                        // Demo mode: Báo log nếu chưa đủ điểm nuốt vật thể lớn
+                        Debug.Log($"[-] Swarm quá nhỏ để nuốt '{gameObject.name}'. Cần: {requiredNanoMass}, Hiện có: {swarm.CurrentNanoMass}");
+                    }
+                }
             }
         }
 
