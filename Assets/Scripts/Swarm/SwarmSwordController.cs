@@ -13,6 +13,7 @@ namespace NanoGrowth
         [Header("References")]
         [SerializeField] private ParticleSystem swarmParticles;
         [SerializeField] private Transform swarmCenter;
+        [SerializeField] private SwarmController swarmController;
         [SerializeField] private TrailRenderer slashTrail;         // Trail khi chém
         [SerializeField] private ParticleSystem slashImpactFX;     // Tia lửa khi chạm Robot
         [SerializeField] private ParticleSystem bladeGlowFX;       // Tia điện chạy dọc lưỡi kiếm
@@ -32,10 +33,27 @@ namespace NanoGrowth
         [SerializeField] private float slashDamage = 50f;          // Sát thương mỗi nhát
         [SerializeField] private float slashRadius = 3.5f;         // Tầm chém
 
+        [Header("Dynamic Sword Scale")]
+        [SerializeField] private float minSwordScale = 1f;
+        [SerializeField] private float maxSwordScale = 4f;
+        [SerializeField] private float swordScaleExponent = 0.9f;
+        [SerializeField] private int swordScaleMinMass = 2500;
+        [SerializeField] private int swordScaleMaxMass = 6000;
+        [SerializeField] private float autoMinSwordScale = 2.5f;
+        [SerializeField] private float autoMaxSwordScale = 8.5f;
+        [SerializeField] private float autoHardCapSwordScale = 14f;
+
         [Header("Visual Feedback")]
         [SerializeField] private float slashShakeAmount = 0.4f;
         [SerializeField] private float slashShakeDuration = 0.15f;
         [SerializeField] private Color bladeColor = new Color(0.2f, 0.8f, 1f, 1f); // Cyan neon
+
+        [Header("Audio")]
+        [SerializeField] private AudioSource slashSfxSource;
+        [SerializeField] private AudioClip slashSfxClip;
+        [SerializeField] private AudioClip slashHitSfxClip;
+        [SerializeField, Range(0f, 1f)] private float slashSfxVolume = 0.9f;
+        [SerializeField, Range(0f, 1f)] private float slashHitSfxVolume = 1f;
 
         // Internal state
         private bool isActive = false;
@@ -45,8 +63,16 @@ namespace NanoGrowth
         private int slashDirection = 1;              // 1 = phải, -1 = trái (đổi chiều mỗi nhát)
         private Quaternion bladeBaseRotation;
         private float originalEmissionRate = 0f;
+        private float originalEmissionRateOverDistance = 0f;
+        private bool originalEmissionEnabled = true;
         private int originalMaxParticles = 0;
         private int swordParticleCount = 0;
+        private float baseBladeLength;
+        private float baseBladeWidth;
+        private float baseBladeThickness;
+        private float baseSlashRadius;
+        private float baseSlashTrailWidthMultiplier;
+        private float baseSlashTrailTime;
 #pragma warning disable 0414
         private bool firstFrame = false; // Teleport ngay frame đầu
 #pragma warning restore 0414
@@ -55,6 +81,11 @@ namespace NanoGrowth
         {
             // Auto-find nếu chưa gán trong Inspector
             if (swarmCenter == null) swarmCenter = transform;
+            if (swarmController == null)
+            {
+                swarmController = GetComponent<SwarmController>();
+                if (swarmController == null) swarmController = GetComponentInParent<SwarmController>();
+            }
             if (swarmParticles == null)
             {
                 SwarmController sc = GetComponent<SwarmController>();
@@ -62,6 +93,16 @@ namespace NanoGrowth
                 if (sc != null) swarmParticles = GetComponentInChildren<ParticleSystem>();
             }
             if (slashTrail == null) slashTrail = GetComponentInChildren<TrailRenderer>();
+
+            baseBladeLength = bladeLength;
+            baseBladeWidth = bladeWidth;
+            baseBladeThickness = bladeThickness;
+            baseSlashRadius = slashRadius;
+            if (slashTrail != null)
+            {
+                baseSlashTrailWidthMultiplier = slashTrail.widthMultiplier;
+                baseSlashTrailTime = slashTrail.time;
+            }
 
             Debug.Log($"[SwordController] Start - Particles: {swarmParticles != null}, Center: {swarmCenter != null}, Trail: {slashTrail != null}");
         }
@@ -71,6 +112,8 @@ namespace NanoGrowth
         /// <summary>Bật Sword Mode, gọi từ SwarmMorphController</summary>
         public void ActivateSword()
         {
+            ApplySwordScaleFromSwarm();
+
             isActive = true;
             firstFrame = true;
             Debug.Log($"[SwordController] ACTIVATED! Particles: {swarmParticles != null}, count: {(swarmParticles != null ? swarmParticles.particleCount : 0)}");
@@ -86,14 +129,61 @@ namespace NanoGrowth
                 var main = swarmParticles.main;
                 main.startColor = bladeColor;
 
-                // Lưu và khóa cứng maxParticles = số hạt hiện tại
-                swordParticleCount = swarmParticles.particleCount;
-                originalMaxParticles = main.maxParticles;
+                // Dùng số hạt đã lưu trong hệ (maxParticles) để tránh bị khóa nhầm về 1
+                originalMaxParticles = Mathf.Max(1, main.maxParticles);
+
+                // Bù hạt còn thiếu trước khi khóa emission để thanh kiếm không "rụng" về ít hạt
+                int currentLiveCount = swarmParticles.particleCount;
+                if (currentLiveCount < originalMaxParticles)
+                {
+                    swarmParticles.Emit(originalMaxParticles - currentLiveCount);
+                }
+
+                // XÓA BỎ GIỚI HẠN TUỔI THỌ: Các hạt sẽ CHẾT nếu hết lifetime, làm thanh kiếm biến mất
+                // Phải cho tất cả hạt sống bất tử (9999s) trong lúc làm hình dạng kiếm
+                ParticleSystem.Particle[] particles = new ParticleSystem.Particle[swarmParticles.particleCount];
+                int count = swarmParticles.GetParticles(particles);
+                for (int i = 0; i < count; i++)
+                {
+                    particles[i].startLifetime = 9999f;
+                    particles[i].remainingLifetime = 9999f;
+                }
+                swarmParticles.SetParticles(particles, count);
+
+                // Lưu và khóa cứng maxParticles theo số đã tích lũy, không theo count tức thời
+                swordParticleCount = originalMaxParticles;
                 main.maxParticles = swordParticleCount; // KHÔNG THỂ sinh thêm
+
+                // XÓA TÍNH NĂNG COLLISION VÀ EXTERNAL FORCES: 
+                // Khi bật Sword, hạt phải quét qua tường/vật thể mà không bị Engine Unity "giết chết" (Action: Kill)
+                var collision = swarmParticles.collision;
+                if (collision.enabled)
+                {
+                    // Lợi dụng bộ nhớ tạm của class để khôi phục sau
+                    PlayerPrefs.SetInt("SwarmColEnabled", 1);
+                    collision.enabled = false;
+                }
+                else
+                {
+                    PlayerPrefs.SetInt("SwarmColEnabled", 0);
+                }
+
+                var force = swarmParticles.externalForces;
+                if (force.enabled)
+                {
+                    PlayerPrefs.SetInt("SwarmForceEnabled", 1);
+                    force.enabled = false;
+                }
+                else
+                {
+                    PlayerPrefs.SetInt("SwarmForceEnabled", 0);
+                }
 
                 // Tắt mọi nguồn emission
                 var emission = swarmParticles.emission;
+                originalEmissionEnabled = emission.enabled;
                 originalEmissionRate = emission.rateOverTime.constant;
+                originalEmissionRateOverDistance = emission.rateOverDistance.constant;
                 emission.rateOverTime = 0f;
                 emission.rateOverDistance = 0f;
                 emission.enabled = false;
@@ -103,6 +193,51 @@ namespace NanoGrowth
                 subEmitters.enabled = false;
 
                 Debug.Log($"[Sword] Locked particles at {swordParticleCount}");
+            }
+        }
+
+        private void ApplySwordScaleFromSwarm()
+        {
+            if (swarmController == null) return;
+
+            float initialRadius = Mathf.Max(swarmController.InitialSwarmRadius, 0.01f);
+            float radiusRatio = swarmController.CurrentSwarmRadius / initialRadius;
+            float radiusScale = Mathf.Pow(radiusRatio, swordScaleExponent);
+
+            float minMass = Mathf.Max(1f, swordScaleMinMass);
+            float maxMass = Mathf.Max(minMass + 1f, swordScaleMaxMass);
+            float currentMass = Mathf.Max(0f, swarmController.CurrentNanoMass);
+            float massLerp = Mathf.InverseLerp(minMass, maxMass, currentMass);
+            float massScale = Mathf.Lerp(autoMinSwordScale, autoMaxSwordScale, massLerp);
+
+            // Sau mốc maxMass, tiếp tục nở thêm để 6000+ nhìn đã hơn.
+            if (currentMass > maxMass)
+            {
+                float extraRatio = (currentMass - maxMass) / maxMass;
+                massScale *= (1f + extraRatio * 0.9f);
+            }
+
+            float desiredScale = Mathf.Max(radiusScale, massScale);
+            float effectiveMin = Mathf.Max(minSwordScale, autoMinSwordScale);
+
+            // Khi Swarm quá lớn (6000+), không được chặn kiếm ở hard-cap thấp.
+            // Scale trần sẽ nới theo radiusRatio để kiếm giữ tỷ lệ với Swarm.
+            float dynamicCapFromRadius = Mathf.Max(autoHardCapSwordScale, radiusRatio * 1.1f);
+            float effectiveMax = Mathf.Max(effectiveMin, Mathf.Max(maxSwordScale, dynamicCapFromRadius));
+            float scale = Mathf.Clamp(desiredScale, effectiveMin, effectiveMax);
+
+            bladeLength = baseBladeLength * scale;
+            bladeWidth = baseBladeWidth * scale;
+            bladeThickness = baseBladeThickness * scale;
+            slashRadius = baseSlashRadius * scale;
+            if (slashTrail != null)
+            {
+                float trailBase = baseSlashTrailWidthMultiplier > 0.0001f ? baseSlashTrailWidthMultiplier : 1f;
+                slashTrail.widthMultiplier = trailBase * scale;
+
+                float trailTimeBase = baseSlashTrailTime > 0.0001f ? baseSlashTrailTime : 0.15f;
+                float trailTimeScale = Mathf.Clamp(scale * 0.55f, 1f, 3.5f);
+                slashTrail.time = trailTimeBase * trailTimeScale;
             }
         }
 
@@ -120,10 +255,25 @@ namespace NanoGrowth
             {
                 var main = swarmParticles.main;
                 main.maxParticles = originalMaxParticles;
+                main.startColor = Color.cyan; // Hoặc màu gốc của Swarm (đang mặc định là cyan)
 
                 var emission = swarmParticles.emission;
-                emission.enabled = true;
+                emission.enabled = originalEmissionEnabled;
                 emission.rateOverTime = originalEmissionRate;
+                emission.rateOverDistance = originalEmissionRateOverDistance;
+
+                // KHÔI PHỤC COLLISION
+                if (PlayerPrefs.GetInt("SwarmColEnabled", 0) == 1)
+                {
+                    var collision = swarmParticles.collision;
+                    collision.enabled = true;
+                }
+                
+                if (PlayerPrefs.GetInt("SwarmForceEnabled", 0) == 1)
+                {
+                    var force = swarmParticles.externalForces;
+                    force.enabled = true;
+                }
 
                 var subEmitters = swarmParticles.subEmitters;
                 subEmitters.enabled = true;
@@ -136,8 +286,22 @@ namespace NanoGrowth
         {
             if (!isActive) return;
 
+            // Re-scale theo NanoMass/Radius liên tục để kiếm to lên ngay khi đang hấp thụ.
+            ApplySwordScaleFromSwarm();
+            SyncSlashTrailToBladeTip();
             ShapeParticlesIntoBlade();
             HandleSlashInput();
+        }
+
+        private void SyncSlashTrailToBladeTip()
+        {
+            if (slashTrail == null || swarmCenter == null) return;
+
+            Vector3 bladeCenter = swarmCenter.position + Vector3.up * bladeHoverHeight;
+            Vector3 bladeTip = bladeCenter + swarmCenter.forward * bladeLength;
+
+            slashTrail.transform.position = bladeTip;
+            slashTrail.transform.rotation = swarmCenter.rotation;
         }
 
         // ─────────────────────────────── BLADE SHAPE ───────────────────────────────
@@ -270,6 +434,16 @@ namespace NanoGrowth
 
             if (slashPressed && Time.time - lastSlashTime >= slashCooldown)
             {
+                // Nhắm hướng chém theo vị trí click/touch hiện tại.
+                if (TryGetAimPoint(out Vector3 aimPoint))
+                {
+                    Vector3 toAim = aimPoint - swarmCenter.position;
+                    toAim.y = 0f;
+                    if (toAim.sqrMagnitude > 0.0001f)
+                    {
+                        currentBladeAngle = Quaternion.LookRotation(toAim.normalized, Vector3.up).eulerAngles.y;
+                    }
+                }
                 StartCoroutine(SlashRoutine());
             }
         }
@@ -278,6 +452,8 @@ namespace NanoGrowth
         {
             isSlashing = true;
             lastSlashTime = Time.time;
+            bladeBaseRotation = Quaternion.Euler(0f, currentBladeAngle, 0f);
+            PlaySlashSfx();
 
             // Bật Trail
             if (slashTrail != null) { slashTrail.Clear(); slashTrail.emitting = true; }
@@ -307,11 +483,21 @@ namespace NanoGrowth
             if (slashTrail != null) slashTrail.emitting = false;
 
             // Detect va chạm trong vùng chém
-            DetectSlashHits();
+            int hitCount = DetectSlashHits();
+            PlaySlashHitSfx(hitCount);
 
-            // Camera Shake
+            // Camera shake nhẹ khi chém trúng nhiều mục tiêu.
             if (CameraFollow.Instance != null)
-                CameraFollow.Instance.Shake(slashShakeDuration, slashShakeAmount);
+            {
+                if (hitCount >= 3)
+                {
+                    CameraFollow.Instance.Shake(Mathf.Max(0.1f, slashShakeDuration), slashShakeAmount * 0.8f);
+                }
+                else if (hitCount >= 2)
+                {
+                    CameraFollow.Instance.Shake(Mathf.Max(0.08f, slashShakeDuration * 0.6f), slashShakeAmount * 0.55f);
+                }
+            }
 
             // Đổi chiều chém cho nhát tiếp theo (trái ↔ phải)
             slashDirection *= -1;
@@ -321,13 +507,66 @@ namespace NanoGrowth
             isSlashing = false;
         }
 
+        private void PlaySlashSfx()
+        {
+            if (slashSfxClip == null) return;
+
+            if (slashSfxSource != null)
+            {
+                slashSfxSource.pitch = Random.Range(0.96f, 1.08f);
+                slashSfxSource.PlayOneShot(slashSfxClip, slashSfxVolume);
+                return;
+            }
+
+            AudioSource.PlayClipAtPoint(slashSfxClip, swarmCenter.position, slashSfxVolume);
+        }
+
+        private void PlaySlashHitSfx(int hitCount)
+        {
+            if (hitCount <= 0 || slashHitSfxClip == null) return;
+
+            float pitch = Mathf.Clamp(1f + hitCount * 0.04f, 1f, 1.2f);
+
+            if (slashSfxSource != null)
+            {
+                slashSfxSource.pitch = pitch;
+                slashSfxSource.PlayOneShot(slashHitSfxClip, slashHitSfxVolume);
+                return;
+            }
+
+            AudioSource.PlayClipAtPoint(slashHitSfxClip, swarmCenter.position, slashHitSfxVolume);
+        }
+
+        private bool TryGetAimPoint(out Vector3 aimPoint)
+        {
+            aimPoint = swarmCenter.position + swarmCenter.forward * 3f;
+
+            Camera cam = Camera.main;
+            if (cam == null) return false;
+
+            Vector3 screenPos = Input.mousePosition;
+            if (Input.touchCount > 0) screenPos = Input.GetTouch(0).position;
+
+            Ray ray = cam.ScreenPointToRay(screenPos);
+            Plane groundPlane = new Plane(Vector3.up, swarmCenter.position);
+            if (groundPlane.Raycast(ray, out float enter))
+            {
+                aimPoint = ray.GetPoint(enter);
+                return true;
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// Tìm tất cả Robot trong tầm chém và gây sát thương.
         /// Dùng OverlapSphere + kiểm tra góc để tạo vùng hình quạt.
         /// </summary>
-        private void DetectSlashHits()
+        private int DetectSlashHits()
         {
             Collider[] hits = Physics.OverlapSphere(swarmCenter.position, slashRadius);
+            int hitCount = 0;
+            HashSet<RobotEnemy> hitRobots = new HashSet<RobotEnemy>();
 
             foreach (Collider hit in hits)
             {
@@ -336,6 +575,8 @@ namespace NanoGrowth
 
                 if (robot != null)
                 {
+                    if (hitRobots.Contains(robot)) continue;
+
                     // Kiểm tra robot có nằm trong "cung chém" không.
                     // QUAN TRỌNG: Dùng hướng cơ bản (trước khi xoay) thay vì hướng lúc vung xong
                     Vector3 forwardDir = bladeBaseRotation * Vector3.forward;
@@ -344,7 +585,9 @@ namespace NanoGrowth
 
                     if (angle <= slashArc * 0.5f)
                     {
+                        hitRobots.Add(robot);
                         robot.TakeDamage(slashDamage);
+                        hitCount++;
 
                         // Spawn hiệu ứng va chạm tại vị trí Robot
                         if (slashImpactFX != null)
@@ -355,6 +598,8 @@ namespace NanoGrowth
                     }
                 }
             }
+
+            return hitCount;
         }
 
         // ─────────────────────────────── GIZMOS ───────────────────────────────

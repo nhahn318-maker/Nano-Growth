@@ -11,7 +11,7 @@ namespace NanoGrowth
     {
         [Header("Settings")]
         [SerializeField] private float dissolveDuration = 1.5f;
-        [SerializeField] private int growthAmount = 100;
+        [SerializeField] public int growthAmount = 100;
         [SerializeField] private int requiredNanoMass = 0; // Lượng hạt nhỏ nhất cần để nuốt vật này
         
         [SerializeField] private float pullSpeed = 5f;
@@ -108,6 +108,7 @@ namespace NanoGrowth
             if (swarm != null)
             {
                 swarm.Grow(growthAmount);
+                SwarmHUD.Instance?.RegisterAbsorb(transform.position, growthAmount);
             }
 
             // Cleanup

@@ -16,6 +16,8 @@ namespace NanoGrowth
         public int growthAmount = 250;
         public int requiredNanoMass = 0; // Thêm check tiến trình
         public float dissolveDuration = 0.8f;
+        [Tooltip("Bật nếu swarm đang đứng trên vật này — sau khi hấp thụ xong swarm sẽ tự hạ xuống nền")]
+        public bool snapToGroundOnAbsorb = false;
 
         [Header("Visual Settings")]
         public string shaderProperty = "_DissolveAmount";
@@ -50,6 +52,16 @@ namespace NanoGrowth
                 liftParticles.Stop();
                 var main = liftParticles.main;
                 main.duration = dissolveDuration;
+
+                // Fix "Particle System is trying to spawn on a mesh with zero surface area"
+                // Shape module trong Inspector có thể để trống (None) nên cần gán lại tại runtime
+                if (propRenderer != null)
+                {
+                    var shape = liftParticles.shape;
+                    shape.enabled = true;
+                    shape.shapeType = ParticleSystemShapeType.MeshRenderer;
+                    shape.meshRenderer = propRenderer;
+                }
             }
         }
 
@@ -65,29 +77,43 @@ namespace NanoGrowth
 
         private void OnTriggerEnter(Collider other)
         {
+            TryAbsorb(other);
+        }
+
+        // Fix: Swarm đứng sẵn trên vật thể, sau khi đạt đủ mass thì cần OnTriggerStay
+        // để kiểm tra lại điều kiện mà không cần phải ra vào lại trigger
+        private void OnTriggerStay(Collider other)
+        {
+            TryAbsorb(other);
+        }
+
+        private void TryAbsorb(Collider other)
+        {
+            if (isDissolving) return;
+
             bool isSwarm = other.GetComponentInParent<SwarmController>() != null || 
                           other.CompareTag("Swarm") || 
                           other.CompareTag("Player");
 
-            if (!isDissolving && isSwarm)
-            {
-                SwarmController swarm = other.GetComponentInParent<SwarmController>();
-                if (swarm == null) swarm = FindObjectOfType<SwarmController>();
+            if (!isSwarm) return;
 
-                if (swarm != null)
+            SwarmController swarm = other.GetComponentInParent<SwarmController>();
+            if (swarm == null) swarm = FindObjectOfType<SwarmController>();
+
+            if (swarm != null)
+            {
+                if (swarm.CurrentNanoMass >= requiredNanoMass)
                 {
-                    if (swarm.CurrentNanoMass >= requiredNanoMass)
-                    {
-                        swarmTarget = other.transform;
-                        StartDissolve();
-                        
-                        // RUNG MÀN HÌNH (Impact)
-                        if (CameraFollow.Instance != null) CameraFollow.Instance.Shake(0.2f, 0.3f);
-                    }
-                    else
-                    {
-                        Debug.Log($"[-] Swarm quá nhỏ để nuốt Prop này. Cần: {requiredNanoMass}, Hiện có: {swarm.CurrentNanoMass}");
-                    }
+                    swarmTarget = other.transform;
+                    StartDissolve();
+                    
+                    // RUNG MÀN HÌNH (Impact)
+                    if (CameraFollow.Instance != null) CameraFollow.Instance.Shake(0.2f, 0.3f);
+                }
+                else
+                {
+                    // Chỉ log trong OnTriggerEnter để tránh spam console mỗi frame
+                    // Debug.Log($"[-] Swarm quá nhỏ để nuốt Prop này. Cần: {requiredNanoMass}, Hiện có: {swarm.CurrentNanoMass}");
                 }
             }
         }
@@ -144,7 +170,24 @@ namespace NanoGrowth
             }
 
             SwarmController swarm = FindObjectOfType<SwarmController>();
-            if (swarm != null) swarm.Grow(growthAmount);
+            Debug.Log($"[Dissolve DONE] '{gameObject.name}' | swarm={(swarm != null ? "found" : "NULL")} | snapToGroundOnAbsorb={snapToGroundOnAbsorb}");
+
+            if (swarm != null)
+            {
+                swarm.Grow(growthAmount);
+                SwarmHUD.Instance?.RegisterAbsorb(transform.position, growthAmount);
+                if (snapToGroundOnAbsorb)
+                {
+                    Debug.Log("[Dissolve] → Gọi SnapToGround()");
+                    swarm.SnapToGround();
+                }
+                else
+                {
+                    Debug.Log("[Dissolve] → snapToGroundOnAbsorb=FALSE, không gọi SnapToGround. Tick checkbox trong Inspector nếu muốn swarm hạ xuống.");
+                }
+            }
+
+
 
             foreach (var mat in propMaterials)
             {

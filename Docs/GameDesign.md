@@ -11,10 +11,10 @@ Người chơi điều khiển một đám mây **Nano-Bot** thế hệ mới th
 ## 🗺️ 2. THIẾT KẾ MAP: "PHÒNG THÍ NGHIỆM TƯƠNG LAI" (Cyber Lab)
 Map được thiết kế theo dạng **Dark Mode** với đèn **Neon xanh/tím** để làm nổi bật bầy Nano.
 
-### Phân khu Map:
-*   **Khu A: Văn phòng (Giai đoạn yếu):** Bàn làm việc, ghế sofa, tủ hồ sơ. Đồ đạc nhỏ giúp Swarm to lên gấp đôi.
-*   **Khu B: Phòng máy chủ (Giai đoạn biến hình):** Dãy Server phát sáng, dây cáp, Robot bảo vệ. Mở khóa kỹ năng **Kiếm**.
-*   **Khu C: Kho bãi & Giao thông (Giai đoạn bá đạo):** Xe nâng, thùng container, máy bay Drone. Mở khóa kỹ năng **Vortex (Hố đen)**.
+### Phân khu Map (3 Zone Tiến Hoá):
+*   **Zone 1: Trên Bàn (Giai đoạn vi mô):** Khởi đầu trên mặt bàn làm việc. Hấp thụ chuột, bàn phím, sách, laptop, đèn bàn nhỏ để tăng kích thước. Khi đủ lớn (đạt mốc mass), Swarm sẽ nuốt trọn chiếc bàn để rơi xuống sàn (Snap to Ground).
+*   **Zone 2: Trong Phòng Khách (Giai đoạn vừa):** Tiếp tục trên nền nhà. Hấp thụ các món đồ nội thất lớn hơn: Sofa, kệ sách, tivi, bàn kính, cây cảnh trong nhà. Khi quét sạch phòng, Swarm phá tường/cửa để lao ra ngoài. Mở khoá dạng **Kiếm**.
+*   **Zone 3: Thành Phố & Robot (Giai đoạn vĩ mô):** Ra ngoài đường phố. Môi trường đô thị ban đêm (đèn neon, xe điện). Cảnh sát **Robot Enemy** xuất hiện tấn công Swarm. Người chơi phải dùng Kiếm để chém rách Robot (thành mảnh vụn) trước khi hút chúng. Mở khóa **Vortex** để hút trọn các vật thể khổng lồ.
 
 ---
 

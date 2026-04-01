@@ -19,6 +19,16 @@ namespace NanoGrowth
         [SerializeField] private Color hitFlashColor = Color.white;
         [SerializeField] private float knockbackForce = 3f;
 
+        [Header("Road Movement")]
+        [SerializeField] private Transform[] roadWaypoints;
+        [SerializeField] private float roadMoveSpeed = 2.8f;
+        [SerializeField] private float waypointReachDistance = 0.2f;
+        [SerializeField] private bool loopWaypoints = true;
+
+        [Header("Contact Damage")]
+        [SerializeField] private int nanoDamageOnTouch = 1000;
+        [SerializeField] private float touchDamageCooldown = 1.0f;
+
         [Header("Death / Shatter")]
         [SerializeField] private GameObject[] shatterPieces;     // Các mảnh vỡ (prefab hoặc child objects)
         [SerializeField] private float shatterForce = 8f;        // Lực bắn mảnh ra
@@ -33,6 +43,8 @@ namespace NanoGrowth
         private Color originalColor;
         private bool isDead = false;
         private Coroutine flashRoutine;
+        private int currentWaypointIndex = 0;
+        private float lastTouchDamageTime = -999f;
 
         private void Start()
         {
@@ -53,6 +65,12 @@ namespace NanoGrowth
                     if (piece != null) piece.SetActive(false);
                 }
             }
+        }
+
+        private void Update()
+        {
+            if (isDead) return;
+            MoveOnRoad();
         }
 
         // ─────────────────────────────── DAMAGE ───────────────────────────────
@@ -126,6 +144,42 @@ namespace NanoGrowth
             }
         }
 
+        private void MoveOnRoad()
+        {
+            if (roadWaypoints == null || roadWaypoints.Length == 0) return;
+            Transform target = roadWaypoints[currentWaypointIndex];
+            if (target == null) return;
+
+            Vector3 currentPos = transform.position;
+            Vector3 targetPos = target.position;
+            targetPos.y = currentPos.y;
+
+            Vector3 toTarget = targetPos - currentPos;
+            if (toTarget.sqrMagnitude <= waypointReachDistance * waypointReachDistance)
+            {
+                AdvanceWaypoint();
+                return;
+            }
+
+            Vector3 moveDir = toTarget.normalized;
+            transform.position += moveDir * roadMoveSpeed * Time.deltaTime;
+            transform.forward = Vector3.Lerp(transform.forward, moveDir, Time.deltaTime * 8f);
+        }
+
+        private void AdvanceWaypoint()
+        {
+            if (roadWaypoints == null || roadWaypoints.Length == 0) return;
+
+            if (loopWaypoints)
+            {
+                currentWaypointIndex = (currentWaypointIndex + 1) % roadWaypoints.Length;
+            }
+            else
+            {
+                currentWaypointIndex = Mathf.Min(currentWaypointIndex + 1, roadWaypoints.Length - 1);
+            }
+        }
+
         // ─────────────────────────────── DEATH ───────────────────────────────
 
         private void Die()
@@ -159,6 +213,39 @@ namespace NanoGrowth
             Destroy(gameObject, 5f);
         }
 
+        private void OnTriggerEnter(Collider other)
+        {
+            TryDamageSwarm(other.gameObject);
+        }
+
+        private void OnTriggerStay(Collider other)
+        {
+            TryDamageSwarm(other.gameObject);
+        }
+
+        private void OnCollisionEnter(Collision collision)
+        {
+            TryDamageSwarm(collision.gameObject);
+        }
+
+        private void OnCollisionStay(Collision collision)
+        {
+            TryDamageSwarm(collision.gameObject);
+        }
+
+        private void TryDamageSwarm(GameObject other)
+        {
+            if (isDead) return;
+            if (Time.time - lastTouchDamageTime < touchDamageCooldown) return;
+
+            SwarmController swarm = other.GetComponentInParent<SwarmController>();
+            if (swarm == null) swarm = other.GetComponent<SwarmController>();
+            if (swarm == null) return;
+
+            swarm.LoseNanoMass(nanoDamageOnTouch);
+            lastTouchDamageTime = Time.time;
+        }
+
         /// <summary>
         /// Bật các mảnh vỡ, bắn tung ra bằng lực ngẫu nhiên.
         /// Mỗi mảnh có Absorbable → bị Swarm hút vào sau một khoảng delay.
@@ -169,7 +256,11 @@ namespace NanoGrowth
             {
                 // Nếu không có mảnh vỡ sẵn, tạo cộng trực tiếp cho Swarm
                 SwarmController swarm = FindObjectOfType<SwarmController>();
-                if (swarm != null) swarm.Grow(growthAmount);
+                if (swarm != null)
+                {
+                    swarm.Grow(growthAmount);
+                    SwarmHUD.Instance?.RegisterAbsorb(transform.position, growthAmount);
+                }
                 return;
             }
 
@@ -187,11 +278,15 @@ namespace NanoGrowth
                 Rigidbody rb = piece.GetComponent<Rigidbody>();
                 if (rb == null) rb = piece.AddComponent<Rigidbody>();
 
-                // Bắn mảnh ra hướng ngẫu nhiên
-                Vector3 explosionDir = (piece.transform.position - transform.position).normalized
-                    + Random.insideUnitSphere * 0.5f;
+                // Chỉ văng ngang theo X/Z (không bắn lên trục Y)
+                Vector3 explosionDir = piece.transform.position - transform.position;
+                explosionDir.y = 0f;
+                Vector3 randomXZ = new Vector3(Random.Range(-0.5f, 0.5f), 0f, Random.Range(-0.5f, 0.5f));
+                explosionDir += randomXZ;
+                if (explosionDir.sqrMagnitude < 0.0001f) explosionDir = transform.forward;
+                explosionDir.Normalize();
                 rb.AddForce(explosionDir * shatterForce, ForceMode.Impulse);
-                rb.AddTorque(Random.insideUnitSphere * shatterForce * 2f, ForceMode.Impulse);
+                rb.AddTorque(Vector3.up * Random.Range(-1f, 1f) * shatterForce * 2f, ForceMode.Impulse);
 
                 // Gắn Absorbable cho mỗi mảnh → Swarm sẽ hút vào sau delay
                 Absorbable absorbable = piece.GetComponent<Absorbable>();

@@ -19,6 +19,8 @@ namespace NanoGrowth
         [SerializeField] private Transform swarmCenter;
         [SerializeField] private float swarmRadius = 0.6f; 
         [SerializeField] private float particlePullForce = 25f; // Tăng thêm để hạt bám theo cực nhanh
+        [Tooltip("Collider nhỏ hơn vòng hạt visual bao nhiêu lần. 0.4 = Collider chỉ bằng 40% bán kính visual, cảm giác cần chạm sát hơn mới kích hoạt.")]
+        [SerializeField] private float colliderRadiusScale = 0.4f;
         
         [Header("Organic Sway (Lấy lư tự nhiên)")]
         [SerializeField] private float swaySpeed = 0.8f; // Nhịp điệu chậm rãi
@@ -30,9 +32,21 @@ namespace NanoGrowth
         private float currentSwaySpeed;
         private float currentSwayAmount;
 
+        private ParticleSystem.Particle[] particlesBuffer; // Bộ đệm tái sử dụng để tránh giật lag nhấp nháy (GC spike)
+
         private SwarmMorphController morphController;
         
-        public int CurrentNanoMass { get; private set; } = 0;
+        [field: Header("Debug Info")]
+        [field: SerializeField] public int CurrentNanoMass { get; private set; } = 0;
+        public float CurrentSwarmRadius => swarmRadius;
+        public float InitialSwarmRadius => _initialRadius;
+
+        // Lưu giá trị gốc để tính tỉ lệ tăng tốc về sau
+        private float _baseMoveSpeed;
+        private float _initialRadius;
+        private int _initialMaxParticles;
+        private float _initialEmissionRate;
+        private float _initialParticleSize;
 
         private void Start()
         {
@@ -41,6 +55,18 @@ namespace NanoGrowth
             
             currentSwaySpeed = swaySpeed;
             currentSwayAmount = swayAmount;
+
+            _baseMoveSpeed = moveSpeed;
+            _initialRadius = Mathf.Max(swarmRadius, 0.01f); // Tránh chia cho 0 nếu swarmRadius chưa set
+            if (swarmParticles != null)
+            {
+                var main = swarmParticles.main;
+                _initialMaxParticles = Mathf.Max(1, main.maxParticles);
+                _initialParticleSize = Mathf.Max(0.01f, main.startSize.constant);
+
+                var emission = swarmParticles.emission;
+                _initialEmissionRate = emission.rateOverTime.constant;
+            }
 
             morphController = GetComponent<SwarmMorphController>();
             if (morphController == null) morphController = GetComponentInParent<SwarmMorphController>();
@@ -53,7 +79,7 @@ namespace NanoGrowth
             SphereCollider col = swarmCenter.GetComponent<SphereCollider>();
             if (col == null) col = swarmCenter.gameObject.AddComponent<SphereCollider>();
             col.isTrigger = true;
-            col.radius = swarmRadius;
+            col.radius = swarmRadius * colliderRadiusScale;
             col.center = Vector3.up * 1.5f;
 
             Rigidbody rb = swarmCenter.GetComponent<Rigidbody>();
@@ -66,17 +92,43 @@ namespace NanoGrowth
 
         private void OnDrawGizmosSelected()
         {
-            if (swarmCenter != null)
-            {
-                Gizmos.color = Color.cyan;
-                Gizmos.DrawWireSphere(swarmCenter.position + Vector3.up * 1.5f, swarmRadius);
-            }
+            Transform center = swarmCenter != null ? swarmCenter : this.transform;
+            Vector3 pos = center.position + Vector3.up * 1.5f;
+
+            // 🟡 Vàng = Vùng bao phủ thực tế của các hạt Particle (swarmRadius)
+            Gizmos.color = new Color(1f, 0.9f, 0f, 0.5f);
+            Gizmos.DrawWireSphere(pos, swarmRadius);
+
+            // 🔴 Đỏ = Vùng Collider Physics thực sự kích hoạt Trigger ăn vật thể
+            Gizmos.color = new Color(1f, 0.2f, 0.2f, 0.8f);
+            Gizmos.DrawWireSphere(pos, swarmRadius * colliderRadiusScale);
+
+#if UNITY_EDITOR
+            // Vẽ label chú thích trong Scene View cho dễ đọc
+            UnityEditor.Handles.color = Color.yellow;
+            UnityEditor.Handles.Label(pos + Vector3.right * swarmRadius, $" Particles r={swarmRadius:F2}");
+            UnityEditor.Handles.color = Color.red;
+            UnityEditor.Handles.Label(pos + Vector3.right * (swarmRadius * colliderRadiusScale), $" Collider r={swarmRadius * colliderRadiusScale:F2}");
+#endif
         }
 
         private void Update()
         {
+            // Safety: reset nếu targetPosition hoặc moveSpeed bị NaN (do bug chia cho 0 trước đây)
+            if (float.IsNaN(targetPosition.x) || float.IsNaN(targetPosition.z) || float.IsInfinity(targetPosition.x))
+            {
+                targetPosition = swarmCenter.position;
+                Debug.LogWarning("[SwarmController] targetPosition bị NaN → đã reset!");
+            }
+            if (float.IsNaN(moveSpeed) || float.IsInfinity(moveSpeed))
+            {
+                moveSpeed = _baseMoveSpeed;
+                Debug.LogWarning("[SwarmController] moveSpeed bị NaN → đã reset về base!");
+            }
+
             HandleInput();
             LerpMovement();
+            SyncColliderRadius();
 
             // Chỉ attract hình cầu khi ở Swarm Mode (không đánh nhau với Sword/Vortex)
             bool isSwarmMode = morphController == null || morphController.CurrentMode == SwarmMorphController.MorphMode.Swarm;
@@ -86,21 +138,68 @@ namespace NanoGrowth
             }
         }
 
+        /// <summary>
+        /// Giữ SphereCollider luôn đúng kích thước world-space bất kể swarmCenter.localScale thay đổi.
+        /// GrowPulse scale swarmCenter → Unity tự nhân col.radius theo scale → collider to hơn dự kiến.
+        /// Fix: col.radius = target / localScale để world-space radius luôn = swarmRadius * colliderRadiusScale.
+        /// </summary>
+        private void SyncColliderRadius()
+        {
+            if (swarmCenter == null) return;
+            // Fix: Phải dùng lossyScale thay vì localScale để tính radius chính xác tuyệt đối trong World Space 
+            float globalScale = Mathf.Max(swarmCenter.lossyScale.x, Mathf.Max(swarmCenter.lossyScale.y, swarmCenter.lossyScale.z));
+            if (globalScale < 0.001f) return; 
+
+            SphereCollider col = swarmCenter.GetComponent<SphereCollider>();
+            if (col != null)
+            {
+                float targetWorldRadius = swarmRadius * colliderRadiusScale;
+                col.radius = targetWorldRadius / globalScale;
+            }
+
+            // Đồng bộ kích thước vòng Shape (vòng xanh lá cây mặc định của Unity) với swarmRadius
+            if (swarmParticles != null)
+            {
+                var shape = swarmParticles.shape;
+                float psScale = Mathf.Max(swarmParticles.transform.lossyScale.x, Mathf.Max(swarmParticles.transform.lossyScale.y, swarmParticles.transform.lossyScale.z));
+                if (psScale > 0.001f) shape.radius = swarmRadius / psScale;
+            }
+        }
+
+        private void OnValidate()
+        {
+            // Cho phép xem vòng Particle Shape (xanh lá cây) thay đổi theo swarmRadius ngay từ lúc chưa bấm Play
+            if (swarmParticles != null)
+            {
+                var shape = swarmParticles.shape;
+                float psScale = Mathf.Max(swarmParticles.transform.lossyScale.x, Mathf.Max(swarmParticles.transform.lossyScale.y, swarmParticles.transform.lossyScale.z));
+                if (psScale > 0.001f) shape.radius = swarmRadius / psScale;
+            }
+        }
+
+
         private void AttractParticles()
         {
             if (swarmParticles == null) return;
 
-            ParticleSystem.Particle[] particles = new ParticleSystem.Particle[swarmParticles.particleCount];
-            int count = swarmParticles.GetParticles(particles);
+            // Đảm bảo buffer luôn đủ sức chứa lượng hạt Particle tối đa (maxParticles)
+            int currentMax = swarmParticles.main.maxParticles;
+            if (particlesBuffer == null || particlesBuffer.Length < currentMax)
+            {
+                particlesBuffer = new ParticleSystem.Particle[currentMax];
+            }
+
+            // GetParticles sẽ đổ hạt vào mảng buffer (không tạo mảng mới để tránh Nhấp nháy/Giật lag khung hình)
+            int count = swarmParticles.GetParticles(particlesBuffer);
 
             Vector3 centerPos = swarmCenter.position + Vector3.up * 1.5f;
 
             for (int i = 0; i < count; i++)
             {
-                Random.InitState((int)particles[i].randomSeed);
+                Random.InitState((int)particlesBuffer[i].randomSeed);
                 Vector3 randomOffset = Random.insideUnitSphere * swarmRadius; 
 
-                float seed = particles[i].randomSeed;
+                float seed = particlesBuffer[i].randomSeed;
                 Vector3 sway = new Vector3(
                     Mathf.PerlinNoise(seed, Time.time * currentSwaySpeed) - 0.5f,
                     Mathf.PerlinNoise(seed + 100, Time.time * currentSwaySpeed) - 0.5f,
@@ -108,47 +207,213 @@ namespace NanoGrowth
                 ) * currentSwayAmount;
 
                 Vector3 individualTarget = centerPos + randomOffset + sway;
-                Vector3 desiredVelocity = (individualTarget - particles[i].position) * particlePullForce;
-                particles[i].velocity = Vector3.Lerp(particles[i].velocity, desiredVelocity, Time.deltaTime * 15f);
+                Vector3 desiredVelocity = (individualTarget - particlesBuffer[i].position) * particlePullForce;
+                particlesBuffer[i].velocity = Vector3.Lerp(particlesBuffer[i].velocity, desiredVelocity, Time.deltaTime * 15f);
             }
 
-            swarmParticles.SetParticles(particles, count);
+            swarmParticles.SetParticles(particlesBuffer, count);
         }
 
         private void HandleInput()
         {
             Vector3 inputDir = Vector3.zero;
-            if (joystick != null) inputDir = new Vector3(joystick.Direction.x, 0, joystick.Direction.y);
-            else inputDir = new Vector3(Input.GetAxis("Horizontal"), 0, Input.GetAxis("Vertical"));
+            if (joystick != null)
+            {
+                inputDir = new Vector3(joystick.Direction.x, 0, joystick.Direction.y);
+
+#if UNITY_EDITOR
+                // Trong Editor: nếu joystick không được kéo thì dùng WASD để test
+                if (inputDir.sqrMagnitude < 0.01f)
+                    inputDir = new Vector3(Input.GetAxis("Horizontal"), 0, Input.GetAxis("Vertical"));
+#endif
+            }
+            else
+            {
+                inputDir = new Vector3(Input.GetAxis("Horizontal"), 0, Input.GetAxis("Vertical"));
+            }
 
             if (inputDir.sqrMagnitude > 0.01f) targetPosition += inputDir * moveSpeed * Time.deltaTime;
         }
+
 
         private void LerpMovement()
         {
             swarmCenter.position = Vector3.Lerp(swarmCenter.position, targetPosition, Time.deltaTime * smoothSpeed);
         }
 
+        /// <summary>
+        /// Swarm dần rơi xuống đất theo fallSpeed mỗi frame,
+        /// dừng khi Raycast phát hiện collider bên dưới.
+        /// </summary>
+        public void SnapToGround()
+        {
+            StartCoroutine(SnapToGroundRoutine());
+        }
+
+        // Test nhanh trong Editor: chuột phải vào component → "Test Snap To Ground"
+        [ContextMenu("Test Snap To Ground")]
+        private void TestSnapToGround() => SnapToGround();
+
+        private IEnumerator SnapToGroundRoutine(float fallSpeed = 6f, float maxFallDistance = 30f)
+        {
+            float startY = targetPosition.y;
+            float minY   = startY - maxFallDistance;
+
+            Debug.Log($"[SnapToGround] ▶ Bắt đầu | swarmCenter={swarmCenter.position} | targetPos={targetPosition} | fallSpeed={fallSpeed}");
+
+            while (targetPosition.y > minY)
+            {
+                Vector3 rayOrigin = new Vector3(
+                    swarmCenter.position.x,
+                    targetPosition.y + 0.3f,
+                    swarmCenter.position.z);
+
+                // Hiển thị tia trong Scene View (bật Gizmos khi Play)
+                Debug.DrawRay(rayOrigin, Vector3.down * 1.0f, Color.cyan, 0.05f);
+
+                if (Physics.Raycast(rayOrigin, Vector3.down, out RaycastHit hit, 1.0f,
+                    Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+                {
+                    // Tia màu trắng = hit sàn
+                    Debug.DrawRay(rayOrigin, Vector3.down * hit.distance, Color.white, 2f);
+                    
+                    // Thêm +1.04f để nâng độ cao nhỉnh lên theo yêu cầu (từ -5.03 lên -4)
+                    targetPosition = new Vector3(targetPosition.x, hit.point.y + 1.04f, targetPosition.z);
+                    
+                    Debug.Log($"[SnapToGround] ✅ Hit '{hit.collider.name}' (layer={LayerMask.LayerToName(hit.collider.gameObject.layer)}) tại y={hit.point.y:F2} | Đã bù +1.04f lên {targetPosition.y}");
+                    yield break;
+                }
+                else
+                {
+                    // Tia màu đỏ = miss (không thấy gì 1 unit phía dưới)
+                    Debug.DrawRay(rayOrigin, Vector3.down * 1.0f, Color.red, 0.05f);
+                }
+
+                targetPosition.y -= fallSpeed * Time.deltaTime;
+                yield return null;
+            }
+
+            Debug.LogWarning($"[SnapToGround] ❌ Rơi hết {maxFallDistance} đơn vị vẫn không tìm thấy sàn!\n" +
+                             $"→ Kiểm tra: Floor có Collider không? isTrigger bị bật không?\n" +
+                             $"→ swarmCenter cuối: {swarmCenter.position}");
+        }
+
+
+
         public void Grow(int amount)
         {
             CurrentNanoMass += amount; // Ghi nhận độ lớn để mở khóa biến hình / ăn vật to hơn
 
             var main = swarmParticles.main;
-            main.maxParticles += amount;
-            swarmParticles.Emit(amount);
+            // Tăng sức chứa tối đa lên thật DƯ DẢ để không bị tràn gây nhấp nháy giới hạn (cũ bị giết, mới đẻ ra chèn lấp)
+            main.maxParticles += amount * 4; 
+            
+            // Nhả tức thì một lượng hạt lớn để bùng nổ tức thì
+            swarmParticles.Emit(amount * 2); 
+
+            // Nhích tốc độ sinh hạt cực ít thôi (0.05f so với 0.5f) vì nếu sinh nhanh quá max limit sẽ gây giật chớp.
+            var emission = swarmParticles.emission;
+            emission.rateOverTime = emission.rateOverTime.constant + (amount * 0.05f); 
             
             StopCoroutine("GrowPulse");
-            StartCoroutine(GrowPulse());
+            StartCoroutine(GrowPulse(amount));
 
             // TRẠNG THÁI HÀO HỨNG: Swarm sôi sục khi ăn
             StopCoroutine("ExcitementRoutine");
             StartCoroutine(ExcitementRoutine());
 
-            swarmRadius += 0.05f;
-            SphereCollider col = swarmCenter.GetComponent<SphereCollider>();
-            if (col != null) col.radius = swarmRadius;
+            float growthFactor = amount * 0.0015f; // Scale pulse lên khi ăn
             
-            moveSpeed += 0.1f;
+            // TỰ ĐỘNG CHUYỂN SỐ SỐ THEO ZONE:
+            // Dưới 3000 điểm (Zone 1, 2) thì giữ nguyên gốc để không bị loãng.
+            // Trên 3000 điểm (Zone 3 - sau phá tường) thì tăng cực mạnh để bù lại kích thước các tòa nhà.
+            bool isZone3 = CurrentNanoMass >= 3000;
+            
+            float radiusGrowth = amount * (isZone3 ? 0.012f : 0.005f);  
+
+            swarmRadius += radiusGrowth;
+            // KHÔNG gán col.radius ở đây vì SyncColliderRadius() trong Update() đã xử lý mỗi frame
+
+            // Tăng kích thước hạt mới (startSize cho emitter)
+            float currentSize = main.startSize.constant;
+            float newSize = currentSize + growthFactor * (isZone3 ? 0.25f : 0.12f); 
+            main.startSize = new ParticleSystem.MinMaxCurve(newSize);
+
+            // Tăng kích thước các hạt CŨ đang tồn tại
+            if (particlesBuffer != null)
+            {
+                int count = swarmParticles.GetParticles(particlesBuffer);
+                for (int i = 0; i < count; i++)
+                {
+                    particlesBuffer[i].startSize = newSize;
+                }
+                swarmParticles.SetParticles(particlesBuffer, count);
+            }
+
+            // Tốc độ di chuyển tỉ lệ trực tiếp với bán kính swarm
+            RecalculateMoveSpeed();
+        }
+
+        public void LoseNanoMass(int amount)
+        {
+            if (amount <= 0 || swarmParticles == null) return;
+
+            int oldMass = CurrentNanoMass;
+            CurrentNanoMass = Mathf.Max(0, CurrentNanoMass - amount);
+            int actualLoss = oldMass - CurrentNanoMass;
+            if (actualLoss <= 0) return;
+
+            var main = swarmParticles.main;
+            var emission = swarmParticles.emission;
+
+            // Giảm sức chứa hạt theo đúng tỉ lệ đã tăng trước đó.
+            int reducedMax = main.maxParticles - (actualLoss * 4);
+            main.maxParticles = Mathf.Max(_initialMaxParticles, reducedMax);
+
+            // Giảm nhịp sinh hạt nhưng không thấp hơn mốc gốc.
+            emission.rateOverTime = Mathf.Max(_initialEmissionRate, emission.rateOverTime.constant - (actualLoss * 0.05f));
+
+            bool wasZone3 = oldMass >= 3000;
+            float radiusLoss = actualLoss * (wasZone3 ? 0.012f : 0.005f);
+            swarmRadius = Mathf.Max(_initialRadius, swarmRadius - radiusLoss);
+
+            float sizeLoss = actualLoss * 0.0015f * (wasZone3 ? 0.25f : 0.12f);
+            float newSize = Mathf.Max(_initialParticleSize, main.startSize.constant - sizeLoss);
+            main.startSize = new ParticleSystem.MinMaxCurve(newSize);
+
+            // Co kích thước các hạt đang tồn tại cho đồng bộ visual.
+            int currentMax = main.maxParticles;
+            if (particlesBuffer == null || particlesBuffer.Length < currentMax)
+            {
+                particlesBuffer = new ParticleSystem.Particle[currentMax];
+            }
+
+            int count = swarmParticles.GetParticles(particlesBuffer);
+            int targetCount = Mathf.Min(count, main.maxParticles);
+            for (int i = 0; i < targetCount; i++)
+            {
+                particlesBuffer[i].startSize = newSize;
+            }
+            swarmParticles.SetParticles(particlesBuffer, targetCount);
+
+            RecalculateMoveSpeed();
+        }
+
+        private void RecalculateMoveSpeed()
+        {
+            if (_initialRadius <= 0.001f)
+            {
+                moveSpeed = _baseMoveSpeed;
+                return;
+            }
+
+            bool isZone3 = CurrentNanoMass >= 3000;
+            float radiusRatio = (swarmRadius - _initialRadius) / _initialRadius;
+            float speedMultiplier = isZone3 ? 1.5f : 0.8f;
+            float speedCap = isZone3 ? 6f : 3f;
+
+            moveSpeed = _baseMoveSpeed + _baseMoveSpeed * radiusRatio * speedMultiplier;
+            moveSpeed = Mathf.Clamp(moveSpeed, _baseMoveSpeed * 0.7f, _baseMoveSpeed * speedCap);
         }
 
         private IEnumerator ExcitementRoutine()
@@ -170,10 +435,11 @@ namespace NanoGrowth
             }
         }
 
-        private IEnumerator GrowPulse()
+        private IEnumerator GrowPulse(int amount)
         {
+            float growthFactor = amount * 0.0015f; // Lượng to lên thực tế
             Vector3 baseScale = swarmCenter.localScale;
-            Vector3 targetScale = baseScale + Vector3.one * 0.15f;
+            Vector3 targetScale = baseScale + Vector3.one * (growthFactor * 2.5f); // Phình ra to hơn lúc mới ăn
             
             float duration = 0.2f;
             float elapsed = 0f;
@@ -185,7 +451,7 @@ namespace NanoGrowth
                 yield return null;
             }
 
-            Vector3 finalScale = baseScale + Vector3.one * 0.05f;
+            Vector3 finalScale = baseScale + Vector3.one * growthFactor; // Co về bằng mức tăng thêm
             elapsed = 0f;
             while (elapsed < duration)
             {

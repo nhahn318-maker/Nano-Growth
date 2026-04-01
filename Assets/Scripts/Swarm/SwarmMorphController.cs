@@ -24,7 +24,7 @@ namespace NanoGrowth
         [SerializeField] private AudioSource transformationSnd;
 
         [Header("Progression / Requirements")]
-        [SerializeField] private int requiredMassForSword = 500; // Cần 500 điểm ăn để biến thành kiếm
+        [SerializeField] private int requiredMassForSword = 3000; // Cần 3000 điểm ăn để biến thành kiếm
 
         public enum MorphMode { Swarm, Sword, Vortex }
         private MorphMode currentMode = MorphMode.Swarm;
@@ -58,10 +58,12 @@ namespace NanoGrowth
                 SwarmController swarm = GetComponent<SwarmController>();
                 if (swarm == null) swarm = GetComponentInParent<SwarmController>();
                 if (swarm == null) swarm = FindObjectOfType<SwarmController>();
+                int requiredToMorph = Mathf.Max(requiredMassForSword, 3000);
 
-                if (swarm != null && swarm.CurrentNanoMass < requiredMassForSword)
+                if (swarm != null && swarm.CurrentNanoMass < requiredToMorph)
                 {
-                    Debug.Log($"[-] Không Đủ Hạt Nano! Bạn cần ăn đạt {requiredMassForSword} kích cỡ mới có thể biến thành Kiếm! Hiện có: {swarm.CurrentNanoMass}");
+                    Debug.Log($"[-] Không Đủ Hạt Nano! Bạn cần ăn đạt {requiredToMorph} kích cỡ mới có thể biến thành Kiếm! Hiện có: {swarm.CurrentNanoMass}");
+                    FindObjectOfType<SwarmHUD>()?.ShowNotEnough();
                     return; // Block the transformation
                 }
             }
