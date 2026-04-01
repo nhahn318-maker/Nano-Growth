@@ -18,7 +18,14 @@ public class SwarmHUD : MonoBehaviour {
     [Header("Feedback - Combo & Pop")]
     public TMP_Text popTextTemplate;
     public TMP_Text comboText;
-    [SerializeField] private float comboWindow = 1.2f;
+    [SerializeField] private float comboWindow = 2.4f;
+    [SerializeField] private float comboIdleResetDelay = 5f;
+    [SerializeField] private Color popColor = new Color(1f, 0.85f, 0.25f, 1f);
+    [SerializeField] private Color popCombo5Color = new Color(1f, 0.58f, 0.2f, 1f);
+    [SerializeField] private Color popCombo10Color = new Color(1f, 0.3f, 0.42f, 1f);
+    [SerializeField] private Color comboColor = new Color(1f, 0.92f, 0.22f, 1f);
+    [SerializeField] private Color combo5Color = new Color(1f, 0.62f, 0.2f, 1f);
+    [SerializeField] private Color combo10Color = new Color(1f, 0.35f, 0.88f, 1f);
 
     [Header("Feedback - Audio")]
     public AudioSource absorbSfxSource;
@@ -37,6 +44,7 @@ public class SwarmHUD : MonoBehaviour {
     private bool unlockedShown = false;
     private int comboCount = 0;
     private float lastAbsorbTime = -999f;
+    private Coroutine comboPulseRoutine;
 
     private void Awake()
     {
@@ -75,6 +83,22 @@ public class SwarmHUD : MonoBehaviour {
             }
         }
 
+        if (comboCount > 0 && Time.time - lastAbsorbTime > comboIdleResetDelay)
+        {
+            comboCount = 0;
+            if (comboText != null)
+            {
+                if (comboPulseRoutine != null)
+                {
+                    StopCoroutine(comboPulseRoutine);
+                    comboPulseRoutine = null;
+                }
+
+                comboText.gameObject.SetActive(false);
+                comboText.transform.localScale = Vector3.one;
+            }
+        }
+
         if (!unlockedShown && cur >= target)
         {
             unlockedShown = true;
@@ -103,7 +127,8 @@ public class SwarmHUD : MonoBehaviour {
 
     private void UpdateCombo()
     {
-        bool keepCombo = Time.time - lastAbsorbTime <= comboWindow;
+        float effectiveWindow = Mathf.Max(0.15f, comboWindow);
+        bool keepCombo = Time.time - lastAbsorbTime <= effectiveWindow;
         comboCount = keepCombo ? comboCount + 1 : 1;
         lastAbsorbTime = Time.time;
     }
@@ -115,12 +140,29 @@ public class SwarmHUD : MonoBehaviour {
         if (comboCount >= 2)
         {
             comboText.gameObject.SetActive(true);
-            comboText.text = $"x{comboCount}";
-            float scale = Mathf.Lerp(1f, 1.35f, Mathf.Clamp01((comboCount - 1) / 6f));
-            comboText.transform.localScale = Vector3.one * scale;
+            bool isCombo10 = comboCount >= 10;
+            bool isCombo5 = comboCount >= 5;
+
+            string comboLabel = isCombo10 ? " OVERDRIVE" : isCombo5 ? " HOT" : string.Empty;
+            Color baseColor = isCombo10 ? combo10Color : isCombo5 ? combo5Color : comboColor;
+            float baseScale = Mathf.Lerp(1.05f, 1.4f, Mathf.Clamp01((comboCount - 1) / 8f));
+            float pulseScale = isCombo10 ? 1.45f : isCombo5 ? 1.3f : 1.18f;
+
+            comboText.text = $"x{comboCount}{comboLabel}";
+            comboText.color = baseColor;
+            comboText.transform.localScale = Vector3.one * baseScale;
+
+            if (comboPulseRoutine != null) StopCoroutine(comboPulseRoutine);
+            comboPulseRoutine = StartCoroutine(AnimateComboPulse(baseScale, pulseScale, baseColor));
         }
         else
         {
+            if (comboPulseRoutine != null)
+            {
+                StopCoroutine(comboPulseRoutine);
+                comboPulseRoutine = null;
+            }
+
             comboText.gameObject.SetActive(false);
         }
     }
@@ -144,24 +186,29 @@ public class SwarmHUD : MonoBehaviour {
         TMP_Text pop = Instantiate(popTextTemplate, popTextTemplate.transform.parent != null ? popTextTemplate.transform.parent : transform);
         RectTransform popRect = pop.GetComponent<RectTransform>();
         if (popRect != null) popRect.anchoredPosition = localPos;
-        pop.text = content;
-        pop.color = Color.white;
+        bool isCombo10 = comboCount >= 10;
+        bool isCombo5 = comboCount >= 5;
+        float scaleBoost = isCombo10 ? 1.35f : isCombo5 ? 1.18f : 1f;
+        string suffix = isCombo10 ? "!!" : isCombo5 ? "!" : string.Empty;
+
+        pop.text = content + suffix;
+        pop.color = GetPopColorForCombo();
         pop.gameObject.SetActive(true);
 
-        StartCoroutine(AnimatePopText(pop));
+        StartCoroutine(AnimatePopText(pop, scaleBoost));
     }
 
-    private IEnumerator AnimatePopText(TMP_Text pop)
+    private IEnumerator AnimatePopText(TMP_Text pop, float scaleBoost)
     {
         if (pop == null) yield break;
 
         RectTransform rect = pop.GetComponent<RectTransform>();
         float elapsed = 0f;
-        float duration = 0.75f;
-        float startScale = 0.9f;
-        float endScale = 1.25f;
+        float duration = 0.78f;
+        float startScale = 0.9f * scaleBoost;
+        float endScale = 1.25f * scaleBoost;
         Vector2 startPos = rect != null ? rect.anchoredPosition : Vector2.zero;
-        Vector2 endPos = startPos + Vector2.up * 60f;
+        Vector2 endPos = startPos + Vector2.up * (60f + 18f * (scaleBoost - 1f));
 
         while (elapsed < duration)
         {
@@ -179,6 +226,38 @@ public class SwarmHUD : MonoBehaviour {
         }
 
         if (pop != null) Destroy(pop.gameObject);
+    }
+
+    private Color GetPopColorForCombo()
+    {
+        if (comboCount >= 10) return popCombo10Color;
+        if (comboCount >= 5) return popCombo5Color;
+        return popColor;
+    }
+
+    private IEnumerator AnimateComboPulse(float baseScale, float pulseScale, Color baseColor)
+    {
+        if (comboText == null) yield break;
+
+        float elapsed = 0f;
+        float duration = 0.2f;
+
+        while (elapsed < duration)
+        {
+            elapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(elapsed / duration);
+            float punch = Mathf.Sin(t * Mathf.PI);
+
+            float currentScale = Mathf.Lerp(baseScale, baseScale * pulseScale, punch);
+            comboText.transform.localScale = Vector3.one * currentScale;
+            comboText.color = Color.Lerp(baseColor, Color.white, punch * 0.35f);
+
+            yield return null;
+        }
+
+        comboText.transform.localScale = Vector3.one * baseScale;
+        comboText.color = baseColor;
+        comboPulseRoutine = null;
     }
 
     private void PlayAbsorbSfx()
