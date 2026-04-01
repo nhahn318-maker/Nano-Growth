@@ -29,6 +29,7 @@ namespace NanoGrowth
         [SerializeField, Range(0.5f, 2f)] private float blockPushMultiplier = 1f;
 
         private bool isBroken = false;
+        public bool IsBroken => isBroken;
         private readonly List<Collider> wallColliders = new List<Collider>();
         private Collider fallbackBlockerCollider;
 

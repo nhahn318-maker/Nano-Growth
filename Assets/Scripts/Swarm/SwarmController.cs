@@ -10,9 +10,16 @@ namespace NanoGrowth
     public class SwarmController : MonoBehaviour
     {
         [Header("Movement Settings")]
-        [SerializeField] private float smoothSpeed = 1000f; 
-        [SerializeField] private float moveSpeed = 8f; // Tốc độ di chuyển khi đẩy Joystick
-        [SerializeField] private Joystick joystick; // Dùng class Joystick từ Joystick Pack
+        [SerializeField] private float smoothSpeed = 1000f;
+        [SerializeField] private float moveSpeed = 8f;
+        [SerializeField] private Joystick joystick;
+        
+        [Header("Speed Scaling")]
+        [SerializeField, Range(0.5f, 3f)] private float minSpeedMultiplier = 1f;
+        [SerializeField] private float zone12SpeedGrowthMultiplier = 1.6f;
+        [SerializeField] private float zone3SpeedGrowthMultiplier = 3.25f;
+        [SerializeField] private float zone12SpeedCapMultiplier = 4.5f;
+        [SerializeField] private float zone3SpeedCapMultiplier = 10f;
         
         [Header("Swarm References")]
         [SerializeField] private ParticleSystem swarmParticles;
@@ -23,9 +30,15 @@ namespace NanoGrowth
         [SerializeField] private float colliderRadiusScale = 0.4f;
         
         [Header("Organic Sway (Lấy lư tự nhiên)")]
-        [SerializeField] private float swaySpeed = 0.8f; // Nhịp điệu chậm rãi
-        [SerializeField] private float swayAmount = 0.3f; // Độ lắc nhẹ nhàng
+        [SerializeField] private float swaySpeed = 0.8f;
+        [SerializeField] private float swayAmount = 0.3f;
 
+        [Header("Damage Feedback")]
+        [SerializeField] private Color damageFlashColor = new Color(1f, 0.22f, 0.22f, 1f);
+        [SerializeField, Range(0.05f, 0.4f)] private float damageFlashDuration = 0.2f;
+        [SerializeField, Range(0f, 1f)] private float damageFlashBlend = 1f;
+        [SerializeField, Range(0.5f, 4f)] private float damageFlashEmissionBoost = 2.2f;
+        
         private Camera mainCam;
         private Vector3 targetPosition;
 
@@ -47,6 +60,16 @@ namespace NanoGrowth
         private int _initialMaxParticles;
         private float _initialEmissionRate;
         private float _initialParticleSize;
+        private ParticleSystem.MinMaxGradient _baseStartColor;
+        private Color _baseParticleColor = Color.white;
+        private bool _hasBaseParticleColor;
+        private Coroutine _damageFlashRoutine;
+        private ParticleSystemRenderer _swarmRenderer;
+        private Material _swarmMaterial;
+        private int _swarmMaterialColorPropId = -1;
+        private int _swarmMaterialEmissionPropId = -1;
+        private Color _baseMaterialColor = Color.white;
+        private Color _baseMaterialEmissionColor = Color.black;
 
         private void Start()
         {
@@ -66,6 +89,11 @@ namespace NanoGrowth
 
                 var emission = swarmParticles.emission;
                 _initialEmissionRate = emission.rateOverTime.constant;
+
+                _baseStartColor = main.startColor;
+                _baseParticleColor = GetRepresentativeColor(_baseStartColor);
+                _hasBaseParticleColor = true;
+                CacheSwarmMaterial();
             }
 
             morphController = GetComponent<SwarmMorphController>();
@@ -168,6 +196,13 @@ namespace NanoGrowth
 
         private void OnValidate()
         {
+            damageFlashDuration = Mathf.Clamp(damageFlashDuration, 0.05f, 0.4f);
+            damageFlashBlend = Mathf.Clamp01(damageFlashBlend);
+            damageFlashEmissionBoost = Mathf.Clamp(damageFlashEmissionBoost, 0.5f, 4f);
+            minSpeedMultiplier = Mathf.Max(0.5f, minSpeedMultiplier);
+            zone12SpeedCapMultiplier = Mathf.Max(minSpeedMultiplier, zone12SpeedCapMultiplier);
+            zone3SpeedCapMultiplier = Mathf.Max(zone12SpeedCapMultiplier, zone3SpeedCapMultiplier);
+
             // Cho phép xem vòng Particle Shape (xanh lá cây) thay đổi theo swarmRadius ngay từ lúc chưa bấm Play
             if (swarmParticles != null)
             {
@@ -306,14 +341,14 @@ namespace NanoGrowth
 
             var main = swarmParticles.main;
             // Tăng sức chứa tối đa lên thật DƯ DẢ để không bị tràn gây nhấp nháy giới hạn (cũ bị giết, mới đẻ ra chèn lấp)
-            main.maxParticles += amount * 4; 
+            main.maxParticles += amount * 4;
             
             // Nhả tức thì một lượng hạt lớn để bùng nổ tức thì
-            swarmParticles.Emit(amount * 2); 
+            swarmParticles.Emit(amount * 2);
 
             // Nhích tốc độ sinh hạt cực ít thôi (0.05f so với 0.5f) vì nếu sinh nhanh quá max limit sẽ gây giật chớp.
             var emission = swarmParticles.emission;
-            emission.rateOverTime = emission.rateOverTime.constant + (amount * 0.05f); 
+            emission.rateOverTime = emission.rateOverTime.constant + (amount * 0.05f);
             
             StopCoroutine("GrowPulse");
             StartCoroutine(GrowPulse(amount));
@@ -397,6 +432,7 @@ namespace NanoGrowth
             swarmParticles.SetParticles(particlesBuffer, targetCount);
 
             RecalculateMoveSpeed();
+            TriggerDamageFlash();
         }
 
         private void RecalculateMoveSpeed()
@@ -408,12 +444,170 @@ namespace NanoGrowth
             }
 
             bool isZone3 = CurrentNanoMass >= 3000;
-            float radiusRatio = (swarmRadius - _initialRadius) / _initialRadius;
-            float speedMultiplier = isZone3 ? 1.5f : 0.8f;
-            float speedCap = isZone3 ? 6f : 3f;
+            float radiusRatio = Mathf.Max(0f, (swarmRadius - _initialRadius) / _initialRadius);
+            float growthMultiplier = isZone3 ? zone3SpeedGrowthMultiplier : zone12SpeedGrowthMultiplier;
+            float capMultiplier = isZone3 ? zone3SpeedCapMultiplier : zone12SpeedCapMultiplier;
 
-            moveSpeed = _baseMoveSpeed + _baseMoveSpeed * radiusRatio * speedMultiplier;
-            moveSpeed = Mathf.Clamp(moveSpeed, _baseMoveSpeed * 0.7f, _baseMoveSpeed * speedCap);
+            float targetMultiplier = 1f + radiusRatio * growthMultiplier;
+            float minMultiplier = Mathf.Max(0.5f, minSpeedMultiplier);
+            float maxMultiplier = Mathf.Max(minMultiplier, capMultiplier);
+            moveSpeed = _baseMoveSpeed * Mathf.Clamp(targetMultiplier, minMultiplier, maxMultiplier);
+        }
+
+        private void TriggerDamageFlash()
+        {
+            if (swarmParticles == null) return;
+
+            if (_damageFlashRoutine != null)
+            {
+                StopCoroutine(_damageFlashRoutine);
+                _damageFlashRoutine = null;
+            }
+
+            _damageFlashRoutine = StartCoroutine(DamageFlashRoutine());
+        }
+
+        private IEnumerator DamageFlashRoutine()
+        {
+            if (swarmParticles == null) yield break;
+
+            var main = swarmParticles.main;
+            if (!_hasBaseParticleColor)
+            {
+                _baseStartColor = main.startColor;
+                _baseParticleColor = GetRepresentativeColor(_baseStartColor);
+                _hasBaseParticleColor = true;
+            }
+
+            CacheSwarmMaterial();
+
+            // Dùng màu damage trực tiếp để flash luôn nổi bật, không bị chìm vào màu swarm gốc.
+            Color flashColor = Color.Lerp(_baseParticleColor, damageFlashColor, Mathf.Clamp01(damageFlashBlend));
+            if (damageFlashBlend < 0.95f) flashColor = damageFlashColor;
+            main.startColor = new ParticleSystem.MinMaxGradient(flashColor);
+            ApplyColorToAliveParticles(flashColor);
+            ApplyMaterialTint(flashColor);
+
+            yield return new WaitForSeconds(Mathf.Max(0.14f, damageFlashDuration));
+
+            main.startColor = _baseStartColor;
+            ApplyColorToAliveParticles(_baseParticleColor);
+            RestoreMaterialTint();
+            _damageFlashRoutine = null;
+        }
+
+        private void ApplyColorToAliveParticles(Color targetColor)
+        {
+            if (swarmParticles == null) return;
+
+            int currentMax = Mathf.Max(1, swarmParticles.main.maxParticles);
+            if (particlesBuffer == null || particlesBuffer.Length < currentMax)
+            {
+                particlesBuffer = new ParticleSystem.Particle[currentMax];
+            }
+
+            int count = swarmParticles.GetParticles(particlesBuffer);
+            if (count <= 0) return;
+
+            Color32 baseColor32 = targetColor;
+            for (int i = 0; i < count; i++)
+            {
+                Color32 c = baseColor32;
+                c.a = particlesBuffer[i].startColor.a;
+                particlesBuffer[i].startColor = c;
+            }
+
+            swarmParticles.SetParticles(particlesBuffer, count);
+        }
+
+        private void CacheSwarmMaterial()
+        {
+            if (_swarmMaterial != null && (_swarmMaterialColorPropId != -1 || _swarmMaterialEmissionPropId != -1)) return;
+            if (swarmParticles == null) return;
+
+            _swarmRenderer = swarmParticles.GetComponent<ParticleSystemRenderer>();
+            if (_swarmRenderer == null) return;
+
+            _swarmMaterial = _swarmRenderer.material;
+            if (_swarmMaterial == null) return;
+
+            int tintId = Shader.PropertyToID("_TintColor");
+            int baseColorId = Shader.PropertyToID("_BaseColor");
+            int colorId = Shader.PropertyToID("_Color");
+            int emissionId = Shader.PropertyToID("_EmissionColor");
+
+            if (_swarmMaterial.HasProperty(tintId))
+            {
+                _swarmMaterialColorPropId = tintId;
+                _baseMaterialColor = _swarmMaterial.GetColor(tintId);
+            }
+            else if (_swarmMaterial.HasProperty(baseColorId))
+            {
+                _swarmMaterialColorPropId = baseColorId;
+                _baseMaterialColor = _swarmMaterial.GetColor(baseColorId);
+            }
+            else if (_swarmMaterial.HasProperty(colorId))
+            {
+                _swarmMaterialColorPropId = colorId;
+                _baseMaterialColor = _swarmMaterial.GetColor(colorId);
+            }
+
+            if (_swarmMaterial.HasProperty(emissionId))
+            {
+                _swarmMaterialEmissionPropId = emissionId;
+                _baseMaterialEmissionColor = _swarmMaterial.GetColor(emissionId);
+            }
+        }
+
+        private void ApplyMaterialTint(Color targetColor)
+        {
+            if (_swarmMaterial == null) return;
+
+            if (_swarmMaterialColorPropId != -1)
+            {
+                _swarmMaterial.SetColor(_swarmMaterialColorPropId, targetColor);
+            }
+
+            if (_swarmMaterialEmissionPropId != -1)
+            {
+                _swarmMaterial.SetColor(_swarmMaterialEmissionPropId, targetColor * damageFlashEmissionBoost);
+            }
+        }
+
+        private void RestoreMaterialTint()
+        {
+            if (_swarmMaterial == null) return;
+
+            if (_swarmMaterialColorPropId != -1)
+            {
+                _swarmMaterial.SetColor(_swarmMaterialColorPropId, _baseMaterialColor);
+            }
+
+            if (_swarmMaterialEmissionPropId != -1)
+            {
+                _swarmMaterial.SetColor(_swarmMaterialEmissionPropId, _baseMaterialEmissionColor);
+            }
+        }
+
+        private static Color GetRepresentativeColor(ParticleSystem.MinMaxGradient gradient)
+        {
+            switch (gradient.mode)
+            {
+                case ParticleSystemGradientMode.Color:
+                    return gradient.color;
+                case ParticleSystemGradientMode.TwoColors:
+                    return Color.Lerp(gradient.colorMin, gradient.colorMax, 0.5f);
+                case ParticleSystemGradientMode.Gradient:
+                    return gradient.gradient != null ? gradient.gradient.Evaluate(0.5f) : Color.white;
+                case ParticleSystemGradientMode.TwoGradients:
+                    Color a = gradient.gradientMin != null ? gradient.gradientMin.Evaluate(0.5f) : Color.white;
+                    Color b = gradient.gradientMax != null ? gradient.gradientMax.Evaluate(0.5f) : Color.white;
+                    return Color.Lerp(a, b, 0.5f);
+                case ParticleSystemGradientMode.RandomColor:
+                    return gradient.gradient != null ? gradient.gradient.Evaluate(0.5f) : Color.white;
+                default:
+                    return Color.white;
+            }
         }
 
         private IEnumerator ExcitementRoutine()
@@ -463,3 +657,4 @@ namespace NanoGrowth
         }
     }
 }
+

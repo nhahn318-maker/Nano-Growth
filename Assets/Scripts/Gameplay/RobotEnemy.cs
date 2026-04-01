@@ -26,7 +26,7 @@ namespace NanoGrowth
         [SerializeField] private bool loopWaypoints = true;
 
         [Header("Contact Damage")]
-        [SerializeField] private int nanoDamageOnTouch = 1000;
+        [SerializeField] private int nanoDamageOnTouch = 2000;
         [SerializeField] private float touchDamageCooldown = 1.0f;
 
         [Header("Death / Shatter")]
@@ -42,12 +42,16 @@ namespace NanoGrowth
         private Material bodyMat;
         private Color originalColor;
         private bool isDead = false;
+        public bool IsDefeated => isDead;
         private Coroutine flashRoutine;
         private int currentWaypointIndex = 0;
         private float lastTouchDamageTime = -999f;
 
         private void Start()
         {
+            // Yêu cầu gameplay: mỗi lần robot chạm Swarm sẽ trừ đúng 2000 nano.
+            nanoDamageOnTouch = 2000;
+
             currentHP = maxHP;
 
             if (bodyRenderer == null) bodyRenderer = GetComponentInChildren<Renderer>();
